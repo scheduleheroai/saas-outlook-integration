@@ -49,7 +49,7 @@ const PROVIDER_CONFIGS: Record<CalendarProvider, ProviderConfig> = {
 };
 
 const ALLOWED_GOOGLE_CALENDAR_USERS = [
-  "shootini28@gmail.com",
+  "test@test.com",
   "oshagreyjoy.118694@gmail.com"
 ];
 
