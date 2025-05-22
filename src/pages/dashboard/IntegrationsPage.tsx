@@ -56,39 +56,56 @@ const ALLOWED_GOOGLE_CALENDAR_USERS = [
 export default function IntegrationsPage() {
   const { user } = useAuth(); // Get current user from AuthContext
   const [selectedIntegrationId, setSelectedIntegrationId] = useState<string | null>(null);
-  const [isBackendConfigured, setIsBackendConfigured] = useState(true); // Assume configured, verify below
+  const [isBackendConfigured, setIsBackendConfigured] = useState(true); 
   const [backendConfigError, setBackendConfigError] = useState<string | null>(null);
   const [configuredProviders, setConfiguredProviders] = useState<string[]>([]);
-  const [isCheckingBackendConfig, setIsCheckingBackendConfig] = useState(true); // New state for calendar-check loading
+  const [isCheckingBackendConfig, setIsCheckingBackendConfig] = useState(true);
   const queryClient = useQueryClient();
+
+  const SUPABASE_CLIENT_CONFIGURED = !!(import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY);
 
   useEffect(() => {
     (async () => {
+      setIsCheckingBackendConfig(true);
+      if (!SUPABASE_CLIENT_CONFIGURED) {
+        setBackendConfigError("Client-side Supabase environment variables (VITE_SUPABASE_URL and/or VITE_SUPABASE_ANON_KEY) are missing. Full backend functionality is unavailable.");
+        setConfiguredProviders([]);
+        setIsBackendConfigured(false);
+        setIsCheckingBackendConfig(false);
+        return;
+      }
+
       try {
         const { data: { session } } = await supabase.auth.getSession();
-        if (!session) throw new Error("Not authenticated");
-        const res = await fetch(
-          `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/calendar-check`,
-          { headers: { Authorization: `Bearer ${session.access_token}` } }
-        );
-        const json: CalendarCheckResponse = await res.json();
-        if (!res.ok || json.error) {
-          if (json.missingVars && json.missingVars.length > 0) {
-             throw new Error(`Missing backend config for: ${json.missingVars.join(', ')}. Some providers may be unavailable.`);
+        if (!session) {
+          setIsBackendConfigured(false);
+          setBackendConfigError("User not authenticated. Cannot check backend calendar configuration.");
+          setConfiguredProviders([]);
+          // No early return, finally will handle setIsCheckingBackendConfig
+        } else {
+          const res = await fetch(
+            `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/calendar-check`,
+            { headers: { Authorization: `Bearer ${session.access_token}` } }
+          );
+          const json: CalendarCheckResponse = await res.json();
+          if (!res.ok || json.error) {
+            if (json.missingVars && json.missingVars.length > 0) {
+               throw new Error(`Missing backend config for: ${json.missingVars.join(', ')}. Some providers may be unavailable.`);
+            }
+            throw new Error(json.error || "Configuration check failed");
           }
-          throw new Error(json.error || "Configuration check failed");
+          setConfiguredProviders(json.configuredProviders || []);
+          setIsBackendConfigured(true); // Backend check indicates readiness for configured providers
         }
-        setConfiguredProviders(json.configuredProviders || []);
-        setIsBackendConfigured(true);
       } catch (e: any) {
-        // Even if specific providers are not configured, the page itself might be "configured" to run
-        setIsBackendConfigured(true); 
-        setBackendConfigError(e.message);
+        setIsBackendConfigured(false); // Any error during check means backend calendar system is not confirmed ready
+        setBackendConfigError(`Error during backend calendar configuration check: ${e.message}`);
+        setConfiguredProviders([]);
       } finally {
         setIsCheckingBackendConfig(false);
       }
     })();
-  }, []);
+  }, [SUPABASE_CLIENT_CONFIGURED]);
 
   const {
     data: integrations = [],
@@ -97,8 +114,14 @@ export default function IntegrationsPage() {
   } = useQuery<CalendarIntegration[]>({
     queryKey: ["calendar-integrations"],
     queryFn: async () => {
+      if (!SUPABASE_CLIENT_CONFIGURED) {
+        return []; // Return empty data, don't set error if client itself is not configured
+      }
       const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error("Not authenticated");
+      if (!session) {
+        // Not authenticated, so no integrations can be fetched. Return empty.
+        return [];
+      }
       const res = await fetch(
         `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/calendar-integration`,
         { headers: { Authorization: `Bearer ${session.access_token}` } }
@@ -135,17 +158,21 @@ export default function IntegrationsPage() {
         }
       }
       
+      // This check covers missing client Supabase config (isBackendConfigured will be false)
+      // or actual backend issues found by calendar-check.
+      if (!isBackendConfigured) { 
+          throw new Error(`Backend not generally configured for ${providerName}. Please check server logs or client Supabase setup.`);
+      }
+
+      // This check covers if a specific provider is not setup on the backend,
+      // or if client Supabase config is missing (configuredProviders will be empty).
       if (!configuredProviders.includes(providerConfig.checkKey)) {
         toast.error(`${providerName} is not available due to backend configuration. Please contact support or check server logs.`);
         throw new Error(`${providerName} is not configured on the backend.`);
       }
       
-      if (!isBackendConfigured) { 
-          throw new Error(`Backend not generally configured for ${providerName}. Please check server logs.`);
-      }
-
       const { data: { session } } = await supabase.auth.getSession();
-      if (!session) throw new Error("Not authenticated");
+      if (!session) throw new Error("Not authenticated"); // Should ideally be caught by isBackendConfigured or page auth guards
 
       const currentPath = window.location.pathname;
 
@@ -176,8 +203,16 @@ export default function IntegrationsPage() {
 
   const disconnectCalendar = useMutation({
     mutationFn: async (id: string) => {
+      // If SUPABASE_CLIENT_CONFIGURED is false, isBackendConfigured should also be false.
+      // Adding a check here for robustness, similar to connectCalendar.
+      if (!isBackendConfigured && !SUPABASE_CLIENT_CONFIGURED) { // Check both for clarity
+          toast.error("Client Supabase configuration missing or backend not ready. Cannot disconnect.");
+          throw new Error("Client Supabase configuration missing or backend not ready.");
+      }
+
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) throw new Error("Not authenticated");
+
       const res = await fetch(
         `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/calendar-integration`,
         {
@@ -207,27 +242,6 @@ export default function IntegrationsPage() {
     return PROVIDER_CONFIGS[providerKey as CalendarProvider]?.name || providerKey.charAt(0).toUpperCase() + providerKey.slice(1);
   };
 
-  if (!isCheckingBackendConfig && !isLoadingIntegrations && backendConfigError && configuredProviders.length === 0) { 
-    return (
-      <div className="space-y-8 p-4 md:p-6">
-         <div>
-            <h1 className="text-3xl font-bold tracking-tight">Calendar Connections</h1>
-            <p className="text-gray-600 mt-1">
-            Connect a calendar to allow the AI Employee to manage your appointments. Only one calendar can be active at a time.
-            </p>
-        </div>
-        <div className="p-6 bg-red-50 border border-red-200 rounded-lg">
-            <div className="flex items-center">
-            <AlertCircle className="h-5 w-5 text-red-500 mr-2" />
-            <span className="text-lg font-semibold text-red-700">Critical Backend Misconfiguration</span>
-            </div>
-            <p className="mt-2 text-red-600">{backendConfigError}</p>
-            <p className="mt-1 text-sm text-red-500">Please contact support or check server logs. Calendar integrations are currently unavailable.</p>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-8 p-4 md:p-6">
       <div>
@@ -237,6 +251,19 @@ export default function IntegrationsPage() {
         </p>
       </div>
 
+      {/* Critical Backend Misconfiguration Message (includes client-side Supabase config issues) */}
+      {!isCheckingBackendConfig && !isLoadingIntegrations && backendConfigError && configuredProviders.length === 0 && (
+        <div className="p-6 bg-red-50 border border-red-200 rounded-lg">
+            <div className="flex items-center">
+            <AlertCircle className="h-5 w-5 text-red-500 mr-2" />
+            <span className="text-lg font-semibold text-red-700">Critical Backend Misconfiguration</span>
+            </div>
+            <p className="mt-2 text-red-600">{backendConfigError}</p>
+            <p className="mt-1 text-sm text-red-500">Calendar integrations are currently unavailable. Please contact support or check server/client configuration.</p>
+        </div>
+      )}
+
+      {/* Partial Configuration Notice (e.g., some providers missing, but not a total failure) */}
       {!isCheckingBackendConfig && !isLoadingIntegrations && backendConfigError && configuredProviders.length > 0 && (
          <div className="p-4 mb-4 text-sm text-yellow-800 bg-yellow-50 rounded-lg border border-yellow-200" role="alert">
            <div className="flex items-center">
@@ -247,12 +274,13 @@ export default function IntegrationsPage() {
          </div>
       )}
 
+      {/* Main Content: Loader, Integrations Error (if real), or Integrations List/Buttons */}
       {isCheckingBackendConfig || isLoadingIntegrations ? (
         <div className="flex justify-center items-center h-64">
           <Loader2 className="h-8 w-8 animate-spin text-hero-blue mr-3" />
           Loading connections…
         </div>
-      ) : integrationsError ? ( 
+      ) : integrationsError ? ( // This shows if SUPABASE_CLIENT_CONFIGURED=true AND actual fetch failed
         <div className="p-6 bg-red-50 border border-red-200 rounded-lg">
             <div className="flex items-center">
                 <AlertCircle className="h-5 w-5 text-red-500 mr-2" />
@@ -262,6 +290,7 @@ export default function IntegrationsPage() {
             <p className="mt-1 text-sm text-red-500">Please try refreshing the page. If the problem persists, contact support.</p>
         </div>
       ) : (
+        // IIFE to render active integration or connection options
         (() => {
           const hasActiveIntegration = integrations.length > 0;
           const activeIntegration = hasActiveIntegration ? integrations[0] : null;
@@ -322,7 +351,7 @@ export default function IntegrationsPage() {
               </div>
             );
           } else {
-            // No active integration, show options to connect (integrations.length is 0 here)
+            // No active integration, show options to connect
             return (
               <div>
                 <h2 className="text-xl font-semibold text-gray-800 mb-1">Connect a Calendar Provider</h2>
@@ -330,32 +359,31 @@ export default function IntegrationsPage() {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {(Object.keys(PROVIDER_CONFIGS) as CalendarProvider[]).map((providerKey) => {
                     const provider = PROVIDER_CONFIGS[providerKey];
-                    const isProviderConfigured = configuredProviders.includes(provider.checkKey);
+                    // isProviderConfigured relies on configuredProviders state, which is updated based on SUPABASE_CLIENT_CONFIGURED and calendar-check
+                    const isProviderConfigured = configuredProviders.includes(provider.checkKey) && isBackendConfigured;
                     const isGoogleProvider = providerKey === "google";
 
-                    let buttonDisabled = connectCalendar.isPending; // Base disabled state
+                    let buttonDisabled = connectCalendar.isPending; 
                     let badgeMessage = "";
                     let currentBadgeClassName = "mt-1 text-xs";
                     let reasonMessage = "";
                     let reasonMessageClassName = "text-xs mt-2 text-center";
 
-                    if (isGoogleProvider) {
+                    if (!isBackendConfigured || !SUPABASE_CLIENT_CONFIGURED) {
+                        buttonDisabled = true;
+                        badgeMessage = "Setup Incomplete";
+                        currentBadgeClassName += " text-gray-600 border-gray-300 bg-gray-50";
+                        reasonMessage = "Client or backend configuration is incomplete. Connection unavailable.";
+                        reasonMessageClassName += " text-red-500";
+                    } else if (isGoogleProvider) {
                       const isCurrentUserAllowedForGoogle = !!(user?.email && ALLOWED_GOOGLE_CALENDAR_USERS.includes(user.email));
-                      
-                      console.log("--- Google Calendar Button State ---");
-                      console.log("User Email:", user?.email);
-                      console.log("Is User Allowed for Google:", isCurrentUserAllowedForGoogle);
-                      console.log("Allowed Emails:", ALLOWED_GOOGLE_CALENDAR_USERS);
-                      console.log("Is Google Backend Configured:", isProviderConfigured);
-                      console.log("Is Connect Mutation Pending:", connectCalendar.isPending);
-
                       if (!isCurrentUserAllowedForGoogle) {
                         buttonDisabled = true;
                         badgeMessage = "Limited Access";
                         currentBadgeClassName += " text-yellow-600 border-yellow-300 bg-yellow-50";
                         reasonMessage = "Google Calendar integration is currently available for select users only.";
                         reasonMessageClassName += " text-orange-500";
-                      } else { // Current user IS allowed for Google
+                      } else { 
                         if (!isProviderConfigured) {
                           buttonDisabled = true;
                           badgeMessage = "Admin setup needed";
@@ -364,9 +392,7 @@ export default function IntegrationsPage() {
                           reasonMessageClassName += " text-orange-500";
                         }
                       }
-                       console.log("Final Button Disabled State for Google:", buttonDisabled);
-                       console.log("------------------------------------");
-                    } else { // For other providers (Acuity, Calendly, Square)
+                    } else { 
                       if (!isProviderConfigured) {
                         buttonDisabled = true;
                         badgeMessage = "Admin setup needed";
@@ -409,7 +435,7 @@ export default function IntegrationsPage() {
                     );
                   })}
                 </div>
-                 {integrations.length === 0 && ( 
+                 {integrations.length === 0 && ( // This will show if no actual integrations or if client-config/auth prevents fetching
                    <div className="text-center py-12 border-dashed border-2 border-gray-300 rounded-lg text-gray-500 mt-8 bg-gray-50">
                      <LinkIcon className="mx-auto mb-3 h-10 w-10 opacity-40" />
                      <p className="font-medium">No calendar connected yet.</p>

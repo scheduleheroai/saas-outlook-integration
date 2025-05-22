@@ -1,23 +1,23 @@
 // src/components/navigation/Sidebar.tsx
-import { NavLink, useNavigate } from 'react-router-dom';
+import {useNavigate } from 'react-router-dom';
 import {
-  LayoutDashboard,
-  Phone,
-  Bot,
-  Link as LinkIcon,
-  User,
+  // LayoutDashboard,
+  // Phone,
+  // Bot,
+  // Link as LinkIcon,
+  // User,
   LogOut,
   Mail,
-  Map // Ensure Map icon is imported
+  // Map // Ensure Map icon is imported
 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
 import FoundingMemberBadge from '@/components/ui/FoundingMemberBadge';
 
-const navigation = [
-  { name: 'Integrations', href: '/dashboard/integrations', icon: LinkIcon },
-];
+// const navigation = [
+//   { name: 'Integrations', href: '/dashboard/integrations', icon: LinkIcon },
+// ];
 
 export default function Sidebar() {
   const { signOut, user, isFoundingMember, profile } = useAuth();
